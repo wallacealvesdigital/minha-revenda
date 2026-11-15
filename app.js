@@ -240,7 +240,7 @@ function tInicio() {
     </section>
     <section class="card">
       <h2 style="margin:0">Visita da empresa</h2>
-      <span class="muted small">${visita ? `Última visita em ${dma(visita.data)}. A próxima deve ser por volta de ${dm(somaDias(visita.data, DIAS_ENTRE_VISITAS))}.` : 'A empresa passa a cada 2 meses: recolhe o que não vendeu, entrega produto novo e recebe o total vendido.'}</span>
+      <span class="muted small">${S.cfg.proximaVisita && S.cfg.proximaVisita >= hoje() ? `${visita ? `Última visita em ${dma(visita.data)}. ` : ''}Próxima visita marcada na lista: <strong>${dma(S.cfg.proximaVisita)}</strong>.` : visita ? `Última visita em ${dma(visita.data)}. A próxima deve ser por volta de ${dm(somaDias(visita.data, DIAS_ENTRE_VISITAS))}.` : 'A empresa passa a cada 2 meses: recolhe o que não vendeu, entrega produto novo e recebe o total vendido.'}</span>
       <a class="btn btn-s" href="#/acerto">A empresa veio: fazer o acerto</a>
     </section>
     <section class="card">
@@ -400,7 +400,16 @@ function tConferir() {
 function confRodape() {
   const incl = LEITURA.itens.filter((x) => x.on && x.qtd > 0);
   const pend = LEITURA.itens.filter((x) => itemProblemas(x).length).length;
-  return `<div class="row small"><span class="muted">${soma(incl, (x) => x.qtd)} unidades em produtos</span><strong>${brl(soma(incl, (x) => x.qtd * (x.preco || 0)))}</strong></div>
+  const T = LEITURA.total;
+  let confere = '';
+  if (T) {
+    const lidos = LEITURA.itens.filter((x) => x.qtd > 0);
+    const q = soma(lidos, (x) => x.qtd), v = r2(soma(lidos, (x) => x.qtd * (x.preco || 0)));
+    confere = q === T.qtd && Math.abs(v - T.valor) < 0.01
+      ? `<span class="small ok">Bate com o total da lista: ${plural(T.qtd, 'peça', 'peças')}, ${brl(T.valor)}.</span>`
+      : `<span class="small warn">O total da lista é ${plural(T.qtd, 'peça', 'peças')} e ${brl(T.valor)}. Aqui deu ${plural(q, 'peça', 'peças')} e ${brl(v)}. Confira quantidades e preços.</span>`;
+  }
+  return `${confere}<div class="row small"><span class="muted">${plural(soma(incl, (x) => x.qtd), "unidade", "unidades")} em produtos</span><strong>${brl(soma(incl, (x) => x.qtd * (x.preco || 0)))}</strong></div>
     <div class="row small"><span class="muted">Se vender tudo, eu ganho</span><span class="ok">${brl(soma(incl, (x) => (x.qtd * (x.preco || 0) * (x.com || 0)) / 100))}</span></div>
     ${pend ? `<span class="small warn">Falta conferir ${plural(pend, 'item marcado', 'itens marcados')} em laranja.</span>` : ''}
     <button type="button" class="btn btn-p" data-a="confConfirmar" ${pend || !incl.length ? 'disabled' : ''}>Colocar no estoque</button>`;
@@ -716,19 +725,30 @@ const TELAS = { inicio: tInicio, estoque: tEstoque, produto: tProduto, foto: tFo
 
 // ================= leitura da foto (Gemini) =================
 const MODELO_PADRAO = 'gemini-2.5-flash';
-const PROMPT = `Esta é a foto de uma lista (nota, romaneio ou pedido) de mercadorias consignadas que uma revendedora de cosméticos e perfumaria recebeu.
-Extraia cada produto da lista, linha por linha:
-- codigo: o código do produto, só os caracteres (sem espaços).
-- nome: o nome/descrição do produto como está escrito.
-- quantidade: quantas unidades vieram (número inteiro).
-- preco_venda: o preço de venda ao consumidor de UMA unidade (não o total da linha). Use ponto como separador decimal.
-- comissao_percentual: o percentual de ganho/comissão/lucro da revendedora naquele produto, se aparecer (ex.: 25 ou 35). Se não aparecer, null.
-Também extraia a data da lista (data de emissão/entrega) no formato AAAA-MM-DD, se aparecer; senão null.
-Se algum campo não estiver legível, use null. Não invente produtos nem valores. Ignore linhas de total, frete, impostos e cabeçalhos.`;
+const PROMPT = `Esta é a foto de uma lista de mercadorias consignadas (moda íntima, lingerie, lençóis e parecidos) que uma revendedora recebeu.
+O modelo mais comum se chama "RELAÇÃO DE PRODUTOS ENTREGUES", com as colunas: Código | Descrição | $ Unit. | Qtd. | Dev. | Ven. | Total.
+Extraia cada produto, linha por linha, usando SÓ o texto impresso:
+- codigo: o número da coluna Código (sem espaços).
+- nome: a Descrição como está impressa, sem asteriscos e sem reticências no fim.
+- quantidade: o número impresso na coluna Qtd. (inteiro). Às vezes ele está circulado à caneta; o número continua valendo.
+- preco_venda: o valor da coluna $ Unit. (preço de UMA unidade). Use ponto como separador decimal (28,80 vira 28.8).
+- comissao_percentual: só se a linha tiver um percentual de comissão próprio impresso; senão null.
+As colunas Dev., Ven. e Total são preenchidas à mão depois: IGNORE tudo nelas. Ignore também qualquer coisa escrita à mão (riscos, tracinhos, vistos, "OK", números rabiscados entre as colunas, setas).
+Além dos itens, extraia:
+- data: a data da lista ("Data:" no topo), no formato AAAA-MM-DD.
+- proxima_visita: a data de "Próxima Visita", no formato AAAA-MM-DD.
+- comissao_geral: se houver um percentual escrito na folha valendo para a lista toda (por exemplo "25%" à mão perto do Total), o número (25). Senão null.
+- total_quantidade: o total impresso de peças na linha "Total" (ex.: 64).
+- total_valor: o valor total impresso da lista (ex.: 3.312,20 vira 3312.2).
+Se algum campo não estiver legível ou não existir, use null. Não invente produtos nem valores. A linha "Total" não é produto.`;
 const SCHEMA = {
   type: 'OBJECT',
   properties: {
     data: { type: 'STRING', nullable: true },
+    proxima_visita: { type: 'STRING', nullable: true },
+    comissao_geral: { type: 'NUMBER', nullable: true },
+    total_quantidade: { type: 'INTEGER', nullable: true },
+    total_valor: { type: 'NUMBER', nullable: true },
     itens: { type: 'ARRAY', items: { type: 'OBJECT', properties: {
       codigo: { type: 'STRING', nullable: true }, nome: { type: 'STRING', nullable: true }, quantidade: { type: 'INTEGER', nullable: true },
       preco_venda: { type: 'NUMBER', nullable: true }, comissao_percentual: { type: 'NUMBER', nullable: true } } } }
@@ -782,12 +802,13 @@ function comprimir(file, max = 2000, qualidade = 0.85) {
   });
 }
 
-function novoItem(x) {
+const pct = (c) => { if (c == null) return null; if (c > 0 && c < 1) c = Math.round(c * 100); return c > 0 && c < 100 ? c : null; };
+function novoItem(x, comGeral = null) {
   const cod = String(x.codigo ?? '').replace(/\s/g, '');
   const p = prodPorCod(cod);
-  let com = x.comissao_percentual;
-  if (com != null && com > 0 && com < 1) com = Math.round(com * 100);
-  if (com != null && (com <= 0 || com >= 100)) com = null;
+  const com = pct(x.comissao_percentual);
+  // percentual escrito na folha pra lista toda: vale pros itens sem percentual próprio, com os botões à mostra pra trocar
+  if (com == null && comGeral != null) return { ...novoItem({ ...x, comissao_percentual: comGeral }), lerCom: true };
   return {
     k: uid(), cod, nome: (x.nome || '').trim() || (p ? p.nome : ''),
     preco: x.preco_venda != null && x.preco_venda > 0 ? r2(x.preco_venda) : p ? p.preco : null,
@@ -842,10 +863,18 @@ const A = {
       V.estado = 'lendo'; V.preview = foto; V.erro = '';
       render();
       const r = await lerLista(foto);
-      const itens = (r.itens || []).filter((x) => x && (x.nome || x.codigo)).map(novoItem);
+      const comGeral = pct(r.comissao_geral);
+      const itens = (r.itens || []).filter((x) => x && (x.nome || x.codigo)).map((x) => novoItem(x, comGeral));
       const dataOk = r.data && /^\d{4}-\d{2}-\d{2}$/.test(r.data) && r.data <= hoje() ? r.data : null;
-      if (juntar) { LEITURA.itens.push(...itens); LEITURA.fotos.push(foto); if (!LEITURA.dataLida && dataOk) Object.assign(LEITURA, { data: dataOk, dataLida: true }); }
-      else LEITURA = { data: dataOk || hoje(), dataLida: !!dataOk, itens, fotos: [foto] };
+      const proxima = r.proxima_visita && /^\d{4}-\d{2}-\d{2}$/.test(r.proxima_visita) ? r.proxima_visita : null;
+      const tot = r.total_quantidade > 0 && r.total_valor > 0 ? { qtd: r.total_quantidade, valor: r2(r.total_valor) } : null;
+      if (juntar) {
+        LEITURA.itens.push(...itens); LEITURA.fotos.push(foto);
+        if (!LEITURA.dataLida && dataOk) Object.assign(LEITURA, { data: dataOk, dataLida: true });
+        if (proxima) LEITURA.proxima = proxima;
+        // cada foto traz seu total: soma os de todas; se uma não trouxer, não dá pra comparar
+        LEITURA.total = LEITURA.total && tot ? { qtd: LEITURA.total.qtd + tot.qtd, valor: r2(LEITURA.total.valor + tot.valor) } : null;
+      } else LEITURA = { data: dataOk || hoje(), dataLida: !!dataOk, itens, fotos: [foto], proxima, total: tot };
       if (!itens.length) toast('Não achei produtos nessa foto. Confira ou adicione à mão.');
       ir('#/conferir');
     } catch (e) {
@@ -854,7 +883,7 @@ const A = {
     return false;
   },
   digitarMao: () => {
-    if (!LEITURA || rota().q.juntar !== '1') LEITURA = { data: hoje(), dataLida: false, itens: [], fotos: [] };
+    if (!LEITURA || rota().q.juntar !== '1') LEITURA = { data: hoje(), dataLida: false, itens: [], fotos: [], proxima: null, total: null };
     LEITURA.itens.push({ ...novoItem({}), edit: true, lerCom: true });
     ir('#/conferir');
     return false;
@@ -900,6 +929,7 @@ const A = {
     const fotos = L.fotos.map((data) => ({ id: uid(), data }));
     for (const f of fotos) ops.push(['fotos', f]);
     ops.push(['movimentos', { id: uid(), criado: Date.now(), tipo: 'chegou', data: L.data, itens: [...porCod.values()], fotos: fotos.map((f) => f.id) }]);
+    if (L.proxima && L.proxima > L.data) ops.push(['config', { ...S.cfg, proximaVisita: L.proxima }]);
     await commit(ops);
     V.feito = { un: soma(incl, (x) => x.qtd), n: porCod.size, data: L.data, fotos: fotos.length };
     LEITURA = null;
@@ -1138,7 +1168,7 @@ document.addEventListener('visibilitychange', () => {
 });
 
 // ================= início =================
-const VERSAO_APP = '1.0';
+const VERSAO_APP = '1.1';
 (async function iniciar() {
   try {
     db = await abrirDB();

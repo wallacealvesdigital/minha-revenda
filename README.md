@@ -10,7 +10,7 @@ PWA em HTML, CSS e JS puros, sem build e sem dependências. Os dados ficam no ce
 ## Publicar (GitHub Pages)
 1. Criar um repositório público (ex.: `minha-revenda`) e subir o conteúdo desta pasta `app/` na raiz.
 2. Settings › Pages › Deploy from a branch › `main` / `/ (root)`.
-3. O endereço fica `https://<usuario>.github.io/minha-revenda/`.
+3. Endereço: https://wallacealvesdigital.github.io/minha-revenda/ (repositório `wallacealvesdigital/minha-revenda`). Atualizar: trocar `VERSAO` no `sw.js`, commit e `git push` nesta pasta.
 
 ## Instalar no celular dela (Android, Chrome)
 1. Abrir o endereço no Chrome › menu ⋮ › "Instalar app" (ou "Adicionar à tela inicial").
@@ -21,6 +21,7 @@ PWA em HTML, CSS e JS puros, sem build e sem dependências. Os dados ficam no ce
 ## Como as regras ficaram
 - A empresa passa a cada 2 meses: recolhe o que não vendeu, entrega produto novo e recebe o TOTAL vendido. A comissão (25% ou 35% sobre o preço de venda) a empresa calcula e paga depois; no app o ganho é só pra acompanhar.
 - O início mostra tudo "desde o último acerto": vendido, ganho previsto e "Passar pra empresa" (= total vendido). O botão "A empresa veio: fazer o acerto" anota quanto ela passou e zera o período; depois oferece devolver e tirar foto da lista nova. Acertos aparecem no histórico e podem ser apagados.
+- Formato da lista (calibrado com a foto real de 20/10/2026, em `../fotos-listas/`): "Relação de Produtos Entregues", colunas Código, Descrição, $ Unit., Qtd., Dev., Ven., Total. O app lê só o impresso (Dev., Ven., Total e rabiscos à mão são ignorados). O percentual escrito à mão na folha (ex.: "25%") vale pra todos os itens, com os botões à mostra pra trocar. O total impresso (peças e valor) é comparado com a soma lida: verde se bate, laranja se não. A "Próxima Visita" da lista aparece no card da visita no início.
 - Foto da lista: lida pelo Gemini (modelo em Ajustes › Avançado, padrão `gemini-2.5-flash`); tudo passa pela tela de conferência. Item sem comissão, preço, código ou quantidade fica em laranja e trava o botão até resolver. Produto que já existe herda a comissão cadastrada.
 - Lista grande: "Juntar outra foto" soma os itens na mesma conferência; código repetido vira um item só.
 - Ao entrar mercadoria, preço e comissão do produto são atualizados pelos da lista nova.
