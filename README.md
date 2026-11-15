@@ -19,7 +19,8 @@ PWA em HTML, CSS e JS puros, sem build e sem dependências. Os dados ficam no ce
 4. Fazer a primeira cópia de segurança e mandar pro Drive.
 
 ## Como as regras ficaram
-- Ganho = comissão (25% ou 35%) sobre o preço de venda. "Repassar pra empresa" = vendido no mês menos o ganho.
+- A empresa passa a cada 2 meses: recolhe o que não vendeu, entrega produto novo e recebe o TOTAL vendido. A comissão (25% ou 35% sobre o preço de venda) a empresa calcula e paga depois; no app o ganho é só pra acompanhar.
+- O início mostra tudo "desde o último acerto": vendido, ganho previsto e "Passar pra empresa" (= total vendido). O botão "A empresa veio: fazer o acerto" anota quanto ela passou e zera o período; depois oferece devolver e tirar foto da lista nova. Acertos aparecem no histórico e podem ser apagados.
 - Foto da lista: lida pelo Gemini (modelo em Ajustes › Avançado, padrão `gemini-2.5-flash`); tudo passa pela tela de conferência. Item sem comissão, preço, código ou quantidade fica em laranja e trava o botão até resolver. Produto que já existe herda a comissão cadastrada.
 - Lista grande: "Juntar outra foto" soma os itens na mesma conferência; código repetido vira um item só.
 - Ao entrar mercadoria, preço e comissão do produto são atualizados pelos da lista nova.
