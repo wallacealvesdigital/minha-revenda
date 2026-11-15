@@ -730,6 +730,7 @@ O modelo mais comum se chama "RELAÇÃO DE PRODUTOS ENTREGUES", com as colunas: 
 Extraia cada produto, linha por linha, usando SÓ o texto impresso:
 - codigo: o número da coluna Código (sem espaços).
 - nome: a Descrição como está impressa, sem asteriscos e sem reticências no fim.
+- asteriscos: true se a Descrição termina com asteriscos (ex.: "LENÇOL DE CASAL**"); senão false.
 - quantidade: o número impresso na coluna Qtd. (inteiro). Às vezes ele está circulado à caneta; o número continua valendo.
 - preco_venda: o valor da coluna $ Unit. (preço de UMA unidade). Use ponto como separador decimal (28,80 vira 28.8).
 - comissao_percentual: só se a linha tiver um percentual de comissão próprio impresso; senão null.
@@ -751,7 +752,7 @@ const SCHEMA = {
     total_valor: { type: 'NUMBER', nullable: true },
     itens: { type: 'ARRAY', items: { type: 'OBJECT', properties: {
       codigo: { type: 'STRING', nullable: true }, nome: { type: 'STRING', nullable: true }, quantidade: { type: 'INTEGER', nullable: true },
-      preco_venda: { type: 'NUMBER', nullable: true }, comissao_percentual: { type: 'NUMBER', nullable: true } } } }
+      preco_venda: { type: 'NUMBER', nullable: true }, comissao_percentual: { type: 'NUMBER', nullable: true }, asteriscos: { type: 'BOOLEAN', nullable: true } } } }
   },
   required: ['itens']
 };
@@ -802,6 +803,8 @@ function comprimir(file, max = 2000, qualidade = 0.85) {
   });
 }
 
+// Na lista da empresa, produto com "**" (os lençóis) ganha 35%; o resto segue o percentual escrito na folha
+const COM_ASTERISCOS = 35;
 const pct = (c) => { if (c == null) return null; if (c > 0 && c < 1) c = Math.round(c * 100); return c > 0 && c < 100 ? c : null; };
 function novoItem(x, comGeral = null) {
   const cod = String(x.codigo ?? '').replace(/\s/g, '');
@@ -864,7 +867,7 @@ const A = {
       render();
       const r = await lerLista(foto);
       const comGeral = pct(r.comissao_geral);
-      const itens = (r.itens || []).filter((x) => x && (x.nome || x.codigo)).map((x) => novoItem(x, comGeral));
+      const itens = (r.itens || []).filter((x) => x && (x.nome || x.codigo)).map((x) => novoItem(x, x.asteriscos ? COM_ASTERISCOS : comGeral));
       const dataOk = r.data && /^\d{4}-\d{2}-\d{2}$/.test(r.data) && r.data <= hoje() ? r.data : null;
       const proxima = r.proxima_visita && /^\d{4}-\d{2}-\d{2}$/.test(r.proxima_visita) ? r.proxima_visita : null;
       const tot = r.total_quantidade > 0 && r.total_valor > 0 ? { qtd: r.total_quantidade, valor: r2(r.total_valor) } : null;
@@ -1168,7 +1171,7 @@ document.addEventListener('visibilitychange', () => {
 });
 
 // ================= início =================
-const VERSAO_APP = '1.1';
+const VERSAO_APP = '1.2';
 (async function iniciar() {
   try {
     db = await abrirDB();
