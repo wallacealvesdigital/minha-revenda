@@ -1,5 +1,5 @@
 // Guarda o app no celular pra abrir sem internet. Trocar VERSAO a cada atualização publicada.
-const VERSAO = 'revenda-v3';
+const VERSAO = 'revenda-v4';
 const ARQUIVOS = ['./', 'index.html', 'styles.css', 'app.js', 'manifest.webmanifest',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png'];
 
@@ -33,4 +33,13 @@ self.addEventListener('fetch', (e) => {
       return cached || rede;
     })
   );
+});
+
+// Tocar no aviso de "cópia feita" abre o app
+self.addEventListener('notificationclick', (e) => {
+  e.notification.close();
+  e.waitUntil(self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((cs) => {
+    for (const c of cs) if ('focus' in c) return c.focus();
+    return self.clients.openWindow('./');
+  }));
 });
