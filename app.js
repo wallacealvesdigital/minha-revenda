@@ -128,16 +128,62 @@ async function carregar() {
     for (const p of caixaAlta) p.nome = titulo(p.nome);
     await gravar(caixaAlta.map((p) => ['produtos', p]));
   }
+  await juntarTamanhos();
+}
+// Na v1.3 cada tamanho era um produto. Junta tudo do mesmo código num produto só, com os tamanhos dentro.
+async function juntarTamanhos() {
+  const grupos = new Map();
+  for (const p of S.produtos) grupos.set(p.cod, [...(grupos.get(p.cod) || []), p]);
+  const ops = [];
+  for (const g of grupos.values()) {
+    if (g.length === 1 && !g[0].tam) continue;
+    g.sort((a, b) => (a.criado || 0) - (b.criado || 0));
+    const recente = g[g.length - 1];
+    const novo = { ...g[0], preco: recente.preco, com: recente.com, qtd: 0, tams: {} };
+    delete novo.tam;
+    for (const p of g) {
+      novo.qtd += p.qtd || 0;
+      if (p.tam) novo.tams[p.tam] = (novo.tams[p.tam] || 0) + (p.qtd || 0);
+      for (const [t, n] of Object.entries(p.tams || {})) novo.tams[t] = (novo.tams[t] || 0) + n;
+    }
+    for (const t of Object.keys(novo.tams)) if (!novo.tams[t]) delete novo.tams[t];
+    if (temTamanhos(novo)) novo.grade = gradeDe(novo.tams);
+    ops.push(['produtos', novo]);
+    for (const p of g.slice(1)) ops.push(['produtos', null, p.id]);
+  }
+  if (ops.length) { await gravar(ops); S.produtos = await ler('produtos'); }
 }
 const salvarCfg = (patch) => commit([['config', { ...S.cfg, ...patch }]]);
 
 // ================= regras do negócio =================
 const produto = (id) => S.produtos.find((p) => p.id === id);
-// O mesmo código pode existir em vários tamanhos: cada tamanho é um produto no estoque
+// Um produto por código. Os tamanhos ficam dentro dele: p.tams = { P: 1, M: 2 }; o que sobra de p.qtd é "sem tamanho".
 const prodPorCod = (cod) => (cod ? S.produtos.find((p) => p.cod === cod) : null);
-const prodPorCodTam = (cod, tam) => (cod ? S.produtos.find((p) => p.cod === cod && (p.tam || '') === (tam || '')) : null);
-const qtdDoCod = (cod) => soma(S.produtos.filter((p) => p.cod === cod), (p) => p.qtd);
-const ordemProd = (a, b) => a.nome.localeCompare(b.nome, 'pt-BR') || ordemTam(a.tam) - ordemTam(b.tam);
+const ordemProd = (a, b) => a.nome.localeCompare(b.nome, 'pt-BR');
+const ACABANDO = 1; // aviso "acabando" quando sobra 1 peça (somando todos os tamanhos)
+const somaObj = (o) => Object.values(o || {}).reduce((t, n) => t + (Number(n) || 0), 0);
+const semTam = (p) => Math.max(0, (p.qtd || 0) - somaObj(p.tams));
+const temTamanhos = (p) => somaObj(p.tams) > 0;
+// tamanhos com peça no estoque, em ordem: [['P', 1], ['M', 2], ['', 1]] ('' = sem tamanho)
+const opcoesTam = (p) => {
+  const o = Object.entries(p.tams || {}).filter(([, n]) => n > 0).sort((a, b) => ordemTam(a[0]) - ordemTam(b[0]));
+  if (semTam(p) > 0) o.push(['', semTam(p)]);
+  return o;
+};
+const disponivel = (p, tam) => (tam ? (p.tams || {})[tam] || 0 : semTam(p));
+const resumoTams = (p) => (temTamanhos(p) ? opcoesTam(p).map(([t, n]) => `${t || 'sem tam.'}: ${n}`).join(' · ') : '');
+// entra (n > 0) ou sai (n < 0) peça de um tamanho
+const mexeEstoque = (p, tam, n) => {
+  const tams = { ...(p.tams || {}) };
+  if (tam) { tams[tam] = (tams[tam] || 0) + n; if (tams[tam] <= 0) delete tams[tam]; }
+  return { ...p, tams, qtd: Math.max(0, (p.qtd || 0) + n) };
+};
+const gradeDe = (tams) => (Object.keys(tams || {}).some((t) => TAM_NUMEROS.includes(t)) ? 'num' : 'letra');
+const tamItem = (i) => {
+  if (i.tam) return ' (' + esc(i.tam) + ')';
+  const o = Object.entries(i.tams || {}).filter(([, n]) => n > 0).sort((a, b) => ordemTam(a[0]) - ordemTam(b[0]));
+  return o.length ? ' (' + o.map(([t, n]) => n + ' ' + esc(t)).join(', ') + ')' : '';
+};
 const cliente = (id) => S.clientes.find((c) => c.id === id);
 const devido = (v) => r2(v.total - v.pago);
 const ganhoVenda = (v) => soma(v.itens, (i) => (i.preco * i.qtd * i.com) / 100);
@@ -264,7 +310,7 @@ function tInicio() {
   const visita = ultimoMov();
   const ultChegou = ultimoMov('chegou');
   const ultDevolvi = ultimoMov('devolvi');
-  const acabando = S.produtos.filter((p) => p.qtd <= 2).length;
+  const acabando = S.produtos.filter((p) => p.qtd <= ACABANDO).length;
   const devedoras = S.clientes.map((c) => ({ c, s: saldo(c.id) })).filter((x) => x.s > 0).sort((a, b) => b.s - a.s).slice(0, 3);
   const mesTxt = new Date().toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' });
   const ub = S.cfg.ultimoBackup;
@@ -323,12 +369,13 @@ function tEstoque(r) {
   V.q = V.q || '';
   const q = norm(V.q.trim());
   const lista = S.produtos
-    .filter((p) => (!q || norm(p.nome).includes(q) || p.cod.includes(q)) && (V.so === 'todos' || p.qtd <= 2))
+    .filter((p) => (!q || norm(p.nome).includes(q) || p.cod.includes(q)) && (V.so === 'todos' || p.qtd <= ACABANDO))
     .sort((a, b) => (a.qtd > 0) !== (b.qtd > 0) ? (a.qtd > 0 ? -1 : 1) : ordemProd(a, b));
-  const nAcab = S.produtos.filter((p) => p.qtd <= 2).length;
+  const nAcab = S.produtos.filter((p) => p.qtd <= ACABANDO).length;
   const itens = lista.map((p) => `<a class="item row" href="#/produto/${encodeURIComponent(p.id)}">
-      <div class="col" style="gap:2px;min-width:0"><strong>${esc(p.nome)}${p.tam ? ` <span class="tag tag-novo">${esc(p.tam)}</span>` : ''}</strong><span class="muted small">Cód. ${esc(p.cod)} · ${brl(p.preco)} · ganho ${p.com}%</span></div>
-      <div class="col" style="align-items:flex-end;gap:4px"><span><strong style="font-size:22px">${p.qtd}</strong> <span class="muted small">un.</span></span>${p.qtd <= 2 ? `<span class="tag">${p.qtd === 0 ? 'Acabou' : 'Acabando'}</span>` : ''}</div>
+      <div class="col" style="gap:2px;min-width:0"><strong>${esc(p.nome)}</strong><span class="muted small">Cód. ${esc(p.cod)} · ${brl(p.preco)} · ganho ${p.com}%</span>
+        ${temTamanhos(p) ? `<span class="small tams-txt">${esc(resumoTams(p))}</span>` : ''}</div>
+      <div class="col" style="align-items:flex-end;gap:4px"><span><strong style="font-size:22px">${p.qtd}</strong> <span class="muted small">un.</span></span>${p.qtd <= ACABANDO ? `<span class="tag">${p.qtd === 0 ? 'Acabou' : 'Última peça'}</span>` : ''}</div>
     </a>`).join('');
   const vazio = !S.produtos.length
     ? '<div class="item col" style="gap:12px"><span>Seu estoque está vazio. Quando chegar mercadoria, toque em “Chegou mercadoria” e tire foto da lista.</span></div>'
@@ -352,10 +399,12 @@ function naoEncontrado(q, volta) {
     ${volta ? `<button type="button" class="btn btn-s" data-a="vendaCadastrar" data-v="${esc(q.trim())}">${IC.mais}Cadastrar o produto</button>` : `<a class="btn btn-s" href="${h}">${IC.mais}Cadastrar o produto</a>`}</div>`;
 }
 
-// Escolha de tamanho: letras (PP a XG) ou números (sutiã); "Sem tamanho" pra lençol e afins
-function escolhaTam(atual, acao, extra = '') {
-  const b = (t, txt) => `<button type="button" class="opt ${(atual || '') === t ? 'on' : ''}" data-a="${acao}" data-v="${esc(t)}" ${extra}>${txt || t}</button>`;
-  return `<div class="tams">${TAM_LETRAS.map((t) => b(t)).join('')}</div><div class="tams">${TAM_NUMEROS.map((t) => b(t)).join('')}</div>${b('', 'Sem tamanho')}`;
+// Grade de tamanhos com + e − (usada no produto e na conferência)
+function gradeTams(lista, tams, menos, mais, prefixo) {
+  return `<div class="grid3">${lista.map((t) => {
+    const n = (tams || {})[t] || 0;
+    return `<div class="tcel ${n ? 'on' : ''}"><strong>${t}</strong><div class="row" style="gap:4px"><button type="button" class="step mini" data-a="${menos}" data-v="${prefixo}${t}" aria-label="Menos ${t}">−</button><span>${n}</span><button type="button" class="step mini" data-a="${mais}" data-v="${prefixo}${t}" aria-label="Mais ${t}">+</button></div></div>`;
+  }).join('')}</div>`;
 }
 
 function tProduto(r) {
@@ -364,20 +413,20 @@ function tProduto(r) {
   if (!novo && !p) return naoAchei('Produto não encontrado.', '#/estoque', 'Voltar ao estoque');
   if (!V.init) {
     const q = String(r.q.q || '').trim();
-    const base = r.q.de ? produto(r.q.de) : null; // "outro tamanho deste produto"
-    const src = p || base;
-    Object.assign(V, { init: 1, cod: src ? src.cod : /^\d+$/.test(q) ? q : '', nome: src ? src.nome : /^\d+$/.test(q) ? '' : titulo(q),
-      preco: src ? moeda(src.preco) : '', com: src ? src.com : null, qtd: p ? p.qtd : 1, tam: p ? p.tam || '' : '' });
+    Object.assign(V, { init: 1, cod: p ? p.cod : /^\d+$/.test(q) ? q : '', nome: p ? p.nome : /^\d+$/.test(q) ? '' : titulo(q),
+      preco: p ? moeda(p.preco) : '', com: p ? p.com : null,
+      grade: p ? (temTamanhos(p) ? p.grade || gradeDe(p.tams) : '') : '', tams: p ? { ...(p.tams || {}) } : {}, sem: p ? semTam(p) : 1 });
   }
   const v = num(V.preco);
   const outra = V.com != null && V.com !== 25 && V.com !== 35;
   const volta = r.q.volta === 'venda' ? '#/venda?voltou=1' : '#/estoque';
+  const total = somaObj(V.tams) + V.sem;
+  const gBtn = (g, txt) => `<button type="button" class="opt ${V.grade === g ? 'on' : ''}" data-a="prodGrade" data-v="${g}">${txt}</button>`;
   return `<div class="screen">
   <header class="top">${voltar(volta, r.q.volta === 'venda' ? 'Voltar pra venda' : 'Estoque')}<h1>${novo ? 'Novo produto' : 'Editar produto'}</h1></header>
   <main class="main">
     <div class="field"><label for="cod">Código</label><input id="cod" class="input" inputmode="numeric" value="${esc(V.cod)}" data-i="cod" placeholder="Ex.: 1351" autocomplete="off" ${novo && !V.cod ? 'data-auto' : ''}></div>
     <div class="field"><label for="nome">Nome do produto</label><input id="nome" class="input" value="${esc(V.nome)}" data-i="nome" data-m="titulo" placeholder="Ex.: Calcinha Fio de Renda" autocomplete="off" ${novo && V.cod && !V.nome ? 'data-auto' : ''}></div>
-    <div class="field"><span class="lbl">Tamanho</span>${escolhaTam(V.tam, 'prodTam')}</div>
     <div class="field"><label for="preco">Preço de venda</label><input id="preco" class="input" inputmode="numeric" value="${esc(V.preco)}" data-i="preco" data-m="brl" placeholder="R$ 0,00" autocomplete="off"></div>
     <div class="field"><span class="lbl">Quanto eu ganho em cada venda</span>
       <div class="grid2"><button type="button" class="opt grande ${V.com === 25 ? 'on' : ''}" data-a="prodCom" data-v="25">25%</button><button type="button" class="opt grande ${V.com === 35 ? 'on' : ''}" data-a="prodCom" data-v="35">35%</button></div>
@@ -386,11 +435,14 @@ function tProduto(r) {
     <div class="card" style="gap:2px" data-r="ganho">${v != null && V.com != null
       ? `<div class="row"><span>Você ganha em cada um</span><span class="ok" style="font-size:22px">${brl((v * V.com) / 100)}</span></div><span class="muted small">O resto (${brl(v - (v * V.com) / 100)}) é da empresa.</span>`
       : '<span class="muted small">Coloque o preço e escolha a porcentagem pra ver quanto você ganha.</span>'}</div>
-    <div class="field"><span class="lbl">Quantas unidades eu tenho</span>${stepper('prodMenos', 'prodMais', V.qtd, '', true)}</div>
+    <div class="field"><span class="lbl">Tamanhos</span><div class="grid3">${gBtn('', 'Sem tamanho')}${gBtn('letra', 'PP a XG')}${gBtn('num', '38 a 48')}</div></div>
+    ${V.grade ? `${gradeTams(V.grade === 'num' ? TAM_NUMEROS : TAM_LETRAS, V.tams, 'prodTamMenos', 'prodTamMais', '')}
+      <div class="row"><span class="small"><strong>Sem tamanho</strong>${V.sem ? '<br><span class="muted">toque no + de um tamanho pra separar</span>' : ''}</span>${stepper('prodMenos', 'prodMais', V.sem)}</div>
+      <div class="row"><span class="lbl">Total</span><strong style="font-size:22px">${plural(total, 'peça', 'peças')}</strong></div>`
+    : `<div class="field"><span class="lbl">Quantas unidades eu tenho</span>${stepper('prodMenos', 'prodMais', V.sem, '', true)}</div>`}
     ${V.erro ? `<div class="erro" role="alert">${esc(V.erro)}</div>` : ''}
     <button type="button" class="btn btn-p" data-a="prodSalvar" data-v="${esc(r.q.volta || '')}" style="margin-top:8px">Salvar produto</button>
-    ${novo ? '' : `<a class="btn btn-s" href="#/produto/novo?de=${encodeURIComponent(p.id)}">${IC.mais}Cadastrar outro tamanho deste produto</a>
-    <button type="button" class="btn btn-perigo" data-a="prodApagar">Apagar produto</button>`}
+    ${novo ? '' : '<button type="button" class="btn btn-perigo" data-a="prodApagar">Apagar produto</button>'}
   </main></div>`;
 }
 
@@ -444,10 +496,7 @@ function confTamanhos(it, k) {
   const resto = (it.qtd || 0) - sep;
   return `<div class="col" style="gap:8px">
     <div class="grid2"><button type="button" class="opt ${grade === 'letra' ? 'on' : ''}" data-a="confGrade" data-v="${k}|letra">PP a XG</button><button type="button" class="opt ${grade === 'num' ? 'on' : ''}" data-a="confGrade" data-v="${k}|num">38 a 48</button></div>
-    <div class="grid3">${lista.map((t) => {
-      const n = (it.tams || {})[t] || 0;
-      return `<div class="tcel ${n ? 'on' : ''}"><strong>${t}</strong><div class="row" style="gap:4px"><button type="button" class="step mini" data-a="confTamMenos" data-v="${k}|${t}" aria-label="Menos ${t}">−</button><span>${n}</span><button type="button" class="step mini" data-a="confTamMais" data-v="${k}|${t}" aria-label="Mais ${t}">+</button></div></div>`;
-    }).join('')}</div>
+    ${gradeTams(lista, it.tams, 'confTamMenos', 'confTamMais', k + '|')}
     <span class="small ${resto < 0 ? 'warn' : 'muted'}">${resto > 0 ? `${plural(resto, 'peça fica', 'peças ficam')} sem tamanho.` : resto === 0 ? 'Todas as peças separadas por tamanho.' : 'Passou da quantidade que chegou.'}</span>
   </div>`;
 }
@@ -462,7 +511,7 @@ function tConferir() {
   const L = LEITURA;
   const itens = L.itens.map((it) => {
     const p = prodPorCod(it.cod);
-    const tinha = p ? qtdDoCod(it.cod) : 0;
+    const tinha = p ? p.qtd : 0;
     const sepTxt = Object.entries(it.tams || {}).filter(([, n]) => n > 0).sort((a, b) => ordemTam(a[0]) - ordemTam(b[0])).map(([t, n]) => n + ' ' + t).join(', ');
     const probs = itemProblemas(it);
     const cls = !it.on ? 'fora' : probs.length ? 'alerta' : '';
@@ -533,9 +582,10 @@ function tDevolver() {
   for (const m of S.movimentos.filter((x) => x.tipo === 'chegou').sort((a, b) => (a.data < b.data ? -1 : 1))) for (const i of m.itens) chegada[i.cod] = m.data;
   const q = norm(V.q.trim());
   const prods = S.produtos.filter((p) => p.qtd > 0).sort((a, b) => (chegada[a.cod] || '').localeCompare(chegada[b.cod] || '') || ordemProd(a, b));
-  const vis = prods.filter((p) => !q || norm(p.nome).includes(q) || p.cod.includes(q) || V.dev[p.id]);
-  const un = prods.reduce((s, p) => s + (V.dev[p.id] || 0), 0);
-  const valor = soma(prods, (p) => (V.dev[p.id] || 0) * p.preco);
+  const devDe = (p) => Object.entries(V.dev).filter(([k]) => k.startsWith(p.id + '|')).reduce((t, [, n]) => t + n, 0);
+  const vis = prods.filter((p) => !q || norm(p.nome).includes(q) || p.cod.includes(q) || devDe(p));
+  const un = prods.reduce((t, p) => t + devDe(p), 0);
+  const valor = soma(prods, (p) => devDe(p) * p.preco);
   return `<div class="screen">
   <header class="top">${voltar('#/estoque', 'Estoque')}<h1>Devolver mercadoria</h1>
     <span class="muted small">Toque no + dos produtos que vão voltar pra empresa.</span>
@@ -543,9 +593,12 @@ function tDevolver() {
     ${prods.length > 6 ? `<div class="search">${IC.busca}<label class="sr" for="busca">Buscar produto</label><input id="busca" type="search" placeholder="Nome ou código" value="${esc(V.q)}" data-i="q" autocomplete="off"></div>` : ''}
   </header>
   <main class="main" data-r="lista">${prods.length ? vis.map((p) => {
-    const n = V.dev[p.id] || 0;
-    return `<div class="conf ${n ? 'sel' : ''}"><div class="col" style="gap:2px"><strong>${esc(p.nome)}${p.tam ? ` <span class="tag tag-novo">${esc(p.tam)}</span>` : ''}</strong><span class="muted small">Tenho ${p.qtd}${chegada[p.cod] ? ' · chegou em ' + dm(chegada[p.cod]) : ''}</span></div>
-      <div class="row"><span class="small" style="font-weight:700">Devolver</span>${stepper('devMenos', 'devMais', n, `data-v="${esc(p.id)}"`)}</div></div>`;
+    const n = devDe(p);
+    const ops = opcoesTam(p);
+    const linhas = temTamanhos(p)
+      ? ops.map(([t, tem]) => `<div class="row"><span class="small"><strong>${t || 'Sem tamanho'}</strong> <span class="muted">· tenho ${tem}</span></span>${stepper('devMenos', 'devMais', V.dev[p.id + '|' + t] || 0, `data-v="${esc(p.id)}|${esc(t)}"`)}</div>`).join('')
+      : `<div class="row"><span class="small" style="font-weight:700">Devolver</span>${stepper('devMenos', 'devMais', V.dev[p.id + '|'] || 0, `data-v="${esc(p.id)}|"`)}</div>`;
+    return `<div class="conf ${n ? 'sel' : ''}"><div class="col" style="gap:2px"><strong>${esc(p.nome)}</strong><span class="muted small">Tenho ${p.qtd}${chegada[p.cod] ? ' · chegou em ' + dm(chegada[p.cod]) : ''}</span></div>${linhas}</div>`;
   }).join('') : '<div class="item">Não tem nada no estoque pra devolver.</div>'}</main>
   <div class="foot"><div class="row small"><span class="muted">${plural(un, 'unidade', 'unidades')}</span><strong>${brl(valor)} em produtos</strong></div>
     <button type="button" class="btn btn-p" data-a="devConfirmar" ${un ? '' : 'disabled'}>Devolver ${plural(un, 'unidade', 'unidades')}</button></div></div>`;
@@ -568,7 +621,7 @@ function tHistorico() {
       ${aberto ? `<div class="body">${m.tipo === 'repasse' ? `<div class="row small"><span>${plural(m.nVendas, 'venda', 'vendas')} no período</span><span>${brl(m.vendido)}</span></div>
         <div class="row small"><span>Meu ganho previsto</span><span class="ok">${brl(m.ganho)}</span></div>
         <button type="button" class="linkbtn small" data-a="acApagar" data-v="${esc(m.id)}" style="color:#9B1C1C">Apagar esse acerto</button>` : ''}
-        ${m.itens.map((i) => `<div class="row small"><span>${i.qtd}× ${esc(i.nome)}${i.tam ? ' (' + esc(i.tam) + ')' : ''}</span><span>${brl(i.qtd * i.preco)}</span></div>`).join('')}
+        ${m.itens.map((i) => `<div class="row small"><span>${i.qtd}× ${esc(i.nome)}${tamItem(i)}</span><span>${brl(i.qtd * i.preco)}</span></div>`).join('')}
         ${(m.fotos || []).map((f, n) => `<button type="button" class="linkbtn small" data-a="verFoto" data-v="${esc(f)}">Ver foto da lista${m.fotos.length > 1 ? ' ' + (n + 1) : ''}</button>`).join('')}</div>` : ''}</div>`;
   }).join('') : '<div class="item">Ainda não tem nada aqui. Cada mercadoria que chega e cada devolução aparecem nessa lista.</div>'}</main>
   ${V.foto ? `<div class="overlay" data-a="fecharFoto"><div class="sheet" role="dialog" aria-label="Foto da lista"><img src="${V.foto}" alt="Foto da lista"><button type="button" class="btn btn-s" data-a="fecharFoto">Fechar</button></div></div>` : ''}
@@ -659,7 +712,7 @@ function tCliente(r) {
     <h2>O que ela comprou</h2>
     ${vendas.length ? vendas.map((v) => `<section class="card">
       <div class="row"><strong>${dm(v.data)}</strong><span class="tag ${devido(v) > 0 ? '' : 'tag-ok'}">${devido(v) > 0 ? 'Falta ' + brl(devido(v)) : 'Pago'}</span></div>
-      ${v.itens.map((i) => `<div class="row small"><span>${i.qtd}× ${esc(i.nome)}${i.tam ? ' (' + esc(i.tam) + ')' : ''}</span><span>${brl(i.qtd * i.preco)}</span></div>`).join('')}
+      ${v.itens.map((i) => `<div class="row small"><span>${i.qtd}× ${esc(i.nome)}${tamItem(i)}</span><span>${brl(i.qtd * i.preco)}</span></div>`).join('')}
       <div class="row small line"><span class="muted">Total ${brl(v.total)} · ${descPag(v)}</span></div>
       <button type="button" class="linkbtn small" data-a="vendaApagar" data-v="${esc(v.id)}" style="align-self:flex-start;color:#9B1C1C">Apagar essa venda</button>
     </section>`).join('') : '<div class="item">Nenhuma compra ainda.</div>'}
@@ -710,7 +763,8 @@ function tVenda(r) {
   if (!V.init && r.q.voltou === '1' && RASCUNHO_VENDA) {
     Object.assign(V, RASCUNHO_VENDA);
     const novo = r.q.novo && produto(r.q.novo);
-    if (novo && novo.qtd > 0 && !V.cart.some((x) => x.id === novo.id)) V.cart.push({ id: novo.id, qtd: 1 });
+    const op = novo && opcoesTam(novo)[0];
+    if (op && !V.cart.some((x) => x.id === novo.id)) V.cart.push({ id: novo.id, tam: op[0], qtd: 1 });
   }
   RASCUNHO_VENDA = null;
   if (!V.init) Object.assign(V, { init: 1, cid: r.q.c && cliente(r.q.c) ? r.q.c : null, cart: [], q: '', modo: 'nada', parte: '' });
@@ -720,27 +774,34 @@ function tVenda(r) {
       <main class="main">${escolherCliente(false, 'venda')}</main></div>`;
   }
   const q = norm(V.q.trim());
-  const naVenda = (id) => (V.cart.find((x) => x.id === id) || { qtd: 0 }).qtd;
-  const sug = q ? S.produtos.filter((p) => norm(p.nome).includes(q) || p.cod.includes(q)).sort((a, b) => (b.qtd > 0) - (a.qtd > 0) || ordemProd(a, b)).slice(0, 8) : [];
+  const naVenda = (id, tam) => (V.cart.find((x) => x.id === id && x.tam === tam) || { qtd: 0 }).qtd;
+  const achados = q ? S.produtos.filter((p) => norm(p.nome).includes(q) || p.cod.includes(q)).sort((a, b) => (b.qtd > 0) - (a.qtd > 0) || ordemProd(a, b)).slice(0, 6) : [];
+  // cada tamanho com peça vira uma sugestão
+  const sug = achados.flatMap((p) => (p.qtd > 0 ? opcoesTam(p) : [[null, 0]]).map(([t, tem]) => ({ p, t, tem })));
   const cart = V.cart.map((x) => ({ ...x, p: produto(x.id) })).filter((x) => x.p);
   const total = soma(cart, (x) => x.qtd * x.p.preco);
   const ganho = soma(cart, (x) => (x.qtd * x.p.preco * x.p.com) / 100);
   const pago = V.modo === 'tudo' ? total : V.modo === 'parte' ? Math.min(num(V.parte) || 0, total) : 0;
+  const etiqueta = (p, t) => (t ? ` <span class="tag tag-novo">${esc(t)}</span>` : t === '' && temTamanhos(p) ? ' <span class="tag">sem tam.</span>' : '');
   return `<div class="screen">
   <header class="top">${voltar('#/', 'Início')}<h1>Nova venda</h1></header>
   <main class="main">
     <div class="card row" style="flex-direction:row"><div class="col" style="gap:0"><span class="muted small">Pra quem</span><strong>${esc(c.nome)}</strong></div><button type="button" class="linkbtn" data-a="trocaCliente">Trocar</button></div>
     <div class="search">${IC.busca}<label class="sr" for="prod">Adicionar produto</label><input id="prod" type="search" placeholder="Adicionar produto: nome ou código" value="${esc(V.q)}" data-i="q" autocomplete="off" data-auto></div>
-    <div data-r="sug" class="col">${sug.length ? `<div class="sug">${sug.map((p) => {
-      const livre = p.qtd - naVenda(p.id);
-      return `<button type="button" data-a="vendaAdd" data-v="${esc(p.id)}" ${livre > 0 ? '' : 'disabled'}><span class="col" style="gap:0"><strong>${esc(p.nome)}${p.tam ? ` <span class="tag tag-novo">${esc(p.tam)}</span>` : ''}</strong><span class="muted small">Cód. ${esc(p.cod)} · ${p.qtd > 0 ? 'tem ' + p.qtd : 'acabou'}</span></span><span>${brl(p.preco)}</span></button>`;
+    <div data-r="sug" class="col">${sug.length ? `<div class="sug">${sug.map(({ p, t, tem }) => {
+      const livre = t === null ? 0 : tem - naVenda(p.id, t);
+      return `<button type="button" data-a="vendaAdd" data-v="${esc(p.id)}|${esc(t || '')}" ${livre > 0 ? '' : 'disabled'}><span class="col" style="gap:0"><strong>${esc(p.nome)}${t === null ? '' : etiqueta(p, t)}</strong><span class="muted small">Cód. ${esc(p.cod)} · ${t === null ? 'acabou' : 'tem ' + tem}</span></span><span>${brl(p.preco)}</span></button>`;
     }).join('')}</div>` : q ? naoEncontrado(V.q, 'venda') : ''}</div>
     <h2>Produtos da venda</h2>
-    ${cart.length ? cart.map((x) => `<div class="card" style="padding:14px 16px">
-      <div class="row" style="align-items:flex-start"><strong>${esc(x.p.nome)}${x.p.tam ? ' (' + esc(x.p.tam) + ')' : ''}</strong><span style="white-space:nowrap">${x.qtd} × ${brl(x.p.preco)}</span></div>
-      <div class="row"><button type="button" class="step txt" data-a="vendaTirar" data-v="${esc(x.id)}">Tirar</button>${stepper('vendaMenos', 'vendaMais', x.qtd, `data-v="${esc(x.id)}"`)}</div>
-      ${x.qtd >= x.p.qtd ? `<span class="small muted">Você tem ${plural(x.p.qtd, 'unidade', 'unidades')} desse no estoque.</span>` : ''}
-    </div>`).join('') : '<span class="muted">Busque um produto acima pra começar.</span>'}
+    ${cart.length ? cart.map((x) => {
+      const chave = esc(x.id) + '|' + esc(x.tam);
+      const tem = disponivel(x.p, x.tam);
+      return `<div class="card" style="padding:14px 16px">
+      <div class="row" style="align-items:flex-start"><strong>${esc(x.p.nome)}${etiqueta(x.p, x.tam)}</strong><span style="white-space:nowrap">${x.qtd} × ${brl(x.p.preco)}</span></div>
+      <div class="row"><button type="button" class="step txt" data-a="vendaTirar" data-v="${chave}">Tirar</button>${stepper('vendaMenos', 'vendaMais', x.qtd, `data-v="${chave}"`)}</div>
+      ${x.qtd >= tem ? `<span class="small muted">Você tem ${plural(tem, 'unidade', 'unidades')} desse${x.tam ? ' no tamanho ' + esc(x.tam) : ''}.</span>` : ''}
+    </div>`;
+    }).join('') : '<span class="muted">Busque um produto acima pra começar.</span>'}
     <h2>Quanto ela pagou agora?</h2>
     <div class="grid3">${[['nada', 'Nada'], ['parte', 'Uma parte'], ['tudo', 'Tudo']].map(([k, t]) => `<button type="button" class="opt ${V.modo === k ? 'on' : ''}" data-a="vendaModo" data-v="${k}">${t}</button>`).join('')}</div>
     ${V.modo === 'parte' ? `<div class="field"><label for="valor">Valor que ela pagou</label><input id="valor" class="money" inputmode="numeric" placeholder="R$ 0,00" value="${esc(V.parte)}" data-i="parte" data-m="brl" autocomplete="off"></div>` : ''}
@@ -802,6 +863,14 @@ function tAjustes() {
       <button type="button" class="btn btn-s" data-a="ajTestar" ${V.teste && V.teste.lendo ? 'disabled' : ''}>${V.teste && V.teste.lendo ? 'Testando…' : 'Testar a chave do Gemini'}</button>
       ${V.teste && V.teste.ok ? `<span class="small ok">${esc(V.teste.ok)}</span>` : ''}
       ${V.teste && V.teste.erro ? `<div class="erro" role="alert">${esc(V.teste.erro)}${V.teste.det ? `<span class="detalhe">${esc(V.teste.det)}</span>` : ''}</div>` : ''}
+    </section>
+    <section class="card">
+      <h2 style="margin:0">Comissão nas listas da empresa</h2>
+      <span class="muted small">Vale pra próxima foto de lista. Na conferência dá pra trocar item por item.</span>
+      <span class="lbl">Peças comuns</span>
+      <div class="grid3">${[[null, 'O que está na folha'], [25, '25%'], [35, '35%']].map(([c, t]) => `<button type="button" class="opt ${(S.cfg.comPecas ?? null) === c ? 'on' : ''}" data-a="ajComPecas" data-v="${c ?? ''}">${t}</button>`).join('')}</div>
+      <span class="lbl">Itens com ** (lençóis)</span>
+      <div class="grid2">${[25, 35].map((c) => `<button type="button" class="opt ${(S.cfg.comAsteriscos ?? COM_ASTERISCOS) === c ? 'on' : ''}" data-a="ajComAst" data-v="${c}">${c}%</button>`).join('')}</div>
     </section>
     <section class="card">
       <h2 style="margin:0">Cópia de segurança</h2>
@@ -1015,7 +1084,8 @@ async function comprimir(file, max = 2000, qualidade = 0.85) {
   return url;
 }
 
-// Na lista da empresa, produto com "**" (os lençóis) ganha 35%; o resto segue o percentual escrito na folha
+// Padrão quando Ajustes não diz nada: item com "**" (lençóis) 35%; o resto segue o percentual escrito na folha.
+// Ainda não confirmado com a empresa (o Wallace acha que pode ser o contrário): por isso dá pra trocar em Ajustes.
 const COM_ASTERISCOS = 35;
 const pct = (c) => { if (c == null) return null; if (c > 0 && c < 1) c = Math.round(c * 100); return c > 0 && c < 100 ? c : null; };
 function novoItem(x, comGeral = null) {
@@ -1043,19 +1113,29 @@ const A = {
 
   // produto
   prodCom: (v) => { V.com = Number(v); },
-  prodMenos: () => { V.qtd = Math.max(0, V.qtd - 1); },
-  prodMais: () => { V.qtd += 1; },
-  prodTam: (t) => { V.tam = t || ''; },
+  prodMenos: () => { V.sem = Math.max(0, V.sem - 1); },
+  prodMais: () => { V.sem += 1; },
+  prodGrade: (g) => {
+    // trocar de grade devolve as peças já separadas pro "sem tamanho"
+    if (g === V.grade) return;
+    V.sem += somaObj(V.tams); V.tams = {}; V.grade = g;
+  },
+  prodTamMais: (t) => { if (V.sem > 0) V.sem -= 1; V.tams[t] = (V.tams[t] || 0) + 1; },
+  prodTamMenos: (t) => { if (!V.tams[t]) return false; V.tams[t] -= 1; if (!V.tams[t]) delete V.tams[t]; },
   prodSalvar: async (volta) => {
     const r = rota();
     const id = r.id && r.id !== 'novo' ? r.id : null;
     const cod = V.cod.trim().replace(/\s/g, '');
     const preco = num(V.preco);
     V.erro = !cod ? 'Coloque o código do produto.' : !V.nome.trim() ? 'Coloque o nome do produto.' : preco == null || preco <= 0 ? 'Coloque o preço de venda.' : V.com == null ? 'Escolha quanto você ganha: 25% ou 35%.' : '';
-    const dono = prodPorCodTam(cod, V.tam);
-    if (!V.erro && dono && dono.id !== id) V.erro = `Já existe o código ${cod}${V.tam ? ' no tamanho ' + V.tam : ' sem tamanho'}: ${dono.nome}. Abra ele no estoque pra mudar a quantidade.`;
+    const dono = prodPorCod(cod);
+    if (!V.erro && dono && dono.id !== id) V.erro = `Já existe um produto com o código ${cod}: ${dono.nome}. Abra ele no estoque pra mudar a quantidade ou os tamanhos.`;
     if (V.erro) return;
-    const obj = { ...(id ? produto(id) : { id: uid(), criado: Date.now() }), cod, nome: titulo(V.nome.trim().replace(/\s+/g, ' ')), tam: V.tam || '', preco: r2(preco), com: V.com, qtd: V.qtd };
+    const tams = {};
+    for (const [t, n] of Object.entries(V.grade ? V.tams : {})) if (n > 0) tams[t] = n;
+    const obj = { ...(id ? produto(id) : { id: uid(), criado: Date.now() }), cod, nome: titulo(V.nome.trim().replace(/\s+/g, ' ')), preco: r2(preco), com: V.com,
+      tams, grade: somaObj(tams) ? V.grade : '', qtd: somaObj(tams) + V.sem };
+    delete obj.tam;
     await commit([['produtos', obj]]);
     toast('Produto salvo.');
     ir(volta === 'venda' ? '#/venda?voltou=1&novo=' + encodeURIComponent(obj.id) : '#/estoque');
@@ -1080,8 +1160,10 @@ const A = {
       V.estado = 'lendo'; V.preview = foto; V.erro = '';
       render();
       const r = await lerLista(foto, (msg) => { V.lendoMsg = msg; if (rota().nome === 'foto' && V.estado === 'lendo') render(); });
-      const comGeral = pct(r.comissao_geral);
-      const itens = (r.itens || []).filter((x) => x && (x.nome || x.codigo)).map((x) => novoItem(x, x.asteriscos ? COM_ASTERISCOS : comGeral));
+      // Ajustes manda; se ela deixou "como está na folha", vale o percentual escrito na lista
+      const comPecas = S.cfg.comPecas ?? pct(r.comissao_geral);
+      const comAst = S.cfg.comAsteriscos ?? COM_ASTERISCOS;
+      const itens = (r.itens || []).filter((x) => x && (x.nome || x.codigo)).map((x) => novoItem(x, x.asteriscos ? comAst : comPecas));
       const dataOk = r.data && /^\d{4}-\d{2}-\d{2}$/.test(r.data) && r.data <= hoje() ? r.data : null;
       const proxima = r.proxima_visita && /^\d{4}-\d{2}-\d{2}$/.test(r.proxima_visita) ? r.proxima_visita : null;
       const tot = r.total_quantidade > 0 && r.total_valor > 0 ? { qtd: r.total_quantidade, valor: r2(r.total_valor) } : null;
@@ -1141,27 +1223,25 @@ const A = {
     const L = LEITURA;
     const incl = L.itens.filter((x) => x.on && x.qtd > 0);
     if (L.itens.some((x) => itemProblemas(x).length) || !incl.length) return;
-    // cada tamanho vira um produto; o que não foi separado fica "sem tamanho".
-    // Mesmo código e tamanho repetidos na lista (ex.: duas fotos) viram um item só.
+    // um produto por código: as peças separadas por tamanho entram em p.tams, o resto fica "sem tamanho".
+    // O mesmo código repetido na lista (ex.: duas fotos) vira um item só.
     const porCod = new Map();
-    const junta = (x, tam, qtd) => {
-      if (qtd <= 0) return;
-      const chave = x.cod + '|' + tam;
-      const j = porCod.get(chave);
-      porCod.set(chave, j ? { ...j, qtd: j.qtd + qtd } : { cod: x.cod, tam, nome: titulo(x.nome.trim()), preco: x.preco, com: x.com, qtd });
-    };
     for (const x of incl) {
-      for (const [t, n] of Object.entries(x.tams || {})) junta(x, t, n);
-      junta(x, '', x.qtd - somaTams(x));
+      const j = porCod.get(x.cod) || { cod: x.cod, nome: titulo(x.nome.trim()), preco: x.preco, com: x.com, qtd: 0, tams: {}, grade: '' };
+      j.qtd += x.qtd;
+      for (const [t, n] of Object.entries(x.tams || {})) if (n > 0) j.tams[t] = (j.tams[t] || 0) + n;
+      if (somaObj(x.tams)) j.grade = x.grade || gradePadrao(x.nome);
+      porCod.set(x.cod, j);
     }
     const ops = [];
-    const novos = new Map();
-    for (const [chave, x] of porCod) {
-      const p = novos.get(chave) || prodPorCodTam(x.cod, x.tam);
-      const irmao = prodPorCod(x.cod); // mesmo produto em outro tamanho: usa o mesmo nome
-      const obj = p ? { ...p, qtd: p.qtd + x.qtd, preco: x.preco, com: x.com }
-        : { id: uid(), criado: Date.now(), cod: x.cod, tam: x.tam, nome: irmao ? irmao.nome : x.nome, preco: x.preco, com: x.com, qtd: x.qtd };
-      novos.set(chave, obj);
+    for (const x of porCod.values()) {
+      const p = prodPorCod(x.cod);
+      let obj;
+      if (p) {
+        obj = { ...p, qtd: p.qtd + x.qtd, preco: x.preco, com: x.com, tams: { ...(p.tams || {}) } };
+        for (const [t, n] of Object.entries(x.tams)) obj.tams[t] = (obj.tams[t] || 0) + n;
+        if (somaObj(x.tams) && !obj.grade) obj.grade = x.grade;
+      } else obj = { id: uid(), criado: Date.now(), cod: x.cod, nome: x.nome, preco: x.preco, com: x.com, qtd: x.qtd, tams: x.tams, grade: x.grade };
       ops.push(['produtos', obj]);
     }
     const fotos = L.fotos.map((data) => ({ id: uid(), data }));
@@ -1175,13 +1255,15 @@ const A = {
 
   // devolução
   devData: (v) => { if (v) V.data = v; },
-  devMenos: (id) => { V.dev[id] = Math.max(0, (V.dev[id] || 0) - 1); },
-  devMais: (id) => { const p = produto(id); V.dev[id] = Math.min(p ? p.qtd : 0, (V.dev[id] || 0) + 1); },
+  devMenos: (k) => { V.dev[k] = Math.max(0, (V.dev[k] || 0) - 1); },
+  devMais: (k) => { const [id, t] = k.split('|'); const p = produto(id); V.dev[k] = Math.min(p ? disponivel(p, t) : 0, (V.dev[k] || 0) + 1); },
   devConfirmar: async () => {
-    const sel = Object.entries(V.dev).filter(([, n]) => n > 0).map(([id, n]) => ({ p: produto(id), n })).filter((x) => x.p);
+    const sel = Object.entries(V.dev).filter(([, n]) => n > 0).map(([k, n]) => { const [id, t] = k.split('|'); return { id, t, n }; }).filter((x) => produto(x.id));
     if (!sel.length) return;
-    const ops = sel.map((x) => ['produtos', { ...x.p, qtd: x.p.qtd - x.n }]);
-    const itens = sel.map((x) => ({ cod: x.p.cod, tam: x.p.tam || '', nome: x.p.nome, preco: x.p.preco, com: x.p.com, qtd: x.n }));
+    const novos = new Map();
+    for (const x of sel) novos.set(x.id, mexeEstoque(novos.get(x.id) || produto(x.id), x.t, -x.n));
+    const ops = [...novos.values()].map((p) => ['produtos', p]);
+    const itens = sel.map((x) => { const p = produto(x.id); return { cod: p.cod, tam: x.t, nome: p.nome, preco: p.preco, com: p.com, qtd: x.n }; });
     ops.push(['movimentos', { id: uid(), criado: Date.now(), tipo: 'devolvi', data: V.data, itens }]);
     await commit(ops);
     V.feito = { un: soma(itens, (i) => i.qtd), valor: soma(itens, (i) => i.qtd * i.preco), data: V.data };
@@ -1228,28 +1310,32 @@ const A = {
   trocaCliente: () => { V.cid = null; V.qc = ''; },
 
   // venda
-  vendaAdd: (id) => {
+  vendaAdd: (k) => {
+    const [id, tam] = k.split('|');
     const p = produto(id);
-    const x = V.cart.find((c) => c.id === id);
-    if (x) x.qtd = Math.min(p.qtd, x.qtd + 1); else V.cart.push({ id, qtd: 1 });
+    if (!p) return;
+    const x = V.cart.find((c) => c.id === id && c.tam === tam);
+    if (x) x.qtd = Math.min(disponivel(p, tam), x.qtd + 1); else V.cart.push({ id, tam, qtd: 1 });
     V.q = '';
     setTimeout(() => { const el = document.getElementById('prod'); if (el) el.blur(); }, 0);
   },
-  vendaMenos: (id) => { const x = V.cart.find((c) => c.id === id); if (x) x.qtd = Math.max(1, x.qtd - 1); },
-  vendaMais: (id) => { const x = V.cart.find((c) => c.id === id); const p = produto(id); if (x && p) x.qtd = Math.min(p.qtd, x.qtd + 1); },
-  vendaTirar: (id) => { V.cart = V.cart.filter((c) => c.id !== id); },
+  vendaMenos: (k) => { const [id, tam] = k.split('|'); const x = V.cart.find((c) => c.id === id && c.tam === tam); if (x) x.qtd = Math.max(1, x.qtd - 1); },
+  vendaMais: (k) => { const [id, tam] = k.split('|'); const x = V.cart.find((c) => c.id === id && c.tam === tam); const p = produto(id); if (x && p) x.qtd = Math.min(disponivel(p, tam), x.qtd + 1); },
+  vendaTirar: (k) => { const [id, tam] = k.split('|'); V.cart = V.cart.filter((c) => !(c.id === id && c.tam === tam)); },
   vendaModo: (v) => { V.modo = v; },
   vendaCadastrar: (q) => { RASCUNHO_VENDA = { ...V, q: '' }; ir('#/produto/novo?volta=venda&q=' + encodeURIComponent(q || '')); return false; },
   vendaFinalizar: async () => {
     const itens = V.cart.map((x) => ({ x, p: produto(x.id) })).filter((y) => y.p && y.x.qtd > 0);
     if (!itens.length) return;
-    const falta = itens.find((y) => y.x.qtd > y.p.qtd);
-    if (falta) { toast(`Só tem ${falta.p.qtd} de ${falta.p.nome} no estoque.`); return; }
+    const falta = itens.find((y) => y.x.qtd > disponivel(y.p, y.x.tam));
+    if (falta) { toast(`Só tem ${disponivel(falta.p, falta.x.tam)} de ${falta.p.nome}${falta.x.tam ? ' no tamanho ' + falta.x.tam : ''} no estoque.`); return; }
     const total = soma(itens, (y) => y.x.qtd * y.p.preco);
     const pago = r2(V.modo === 'tudo' ? total : V.modo === 'parte' ? Math.min(num(V.parte) || 0, total) : 0);
     const venda = { id: uid(), criado: Date.now(), clienteId: V.cid, data: hoje(), total, pago,
-      itens: itens.map((y) => ({ cod: y.p.cod, tam: y.p.tam || '', nome: y.p.nome, preco: y.p.preco, com: y.p.com, qtd: y.x.qtd })) };
-    const ops = [['vendas', venda], ...itens.map((y) => ['produtos', { ...y.p, qtd: y.p.qtd - y.x.qtd }])];
+      itens: itens.map((y) => ({ cod: y.p.cod, tam: y.x.tam || '', nome: y.p.nome, preco: y.p.preco, com: y.p.com, qtd: y.x.qtd })) };
+    const novos = new Map();
+    for (const y of itens) novos.set(y.p.id, mexeEstoque(novos.get(y.p.id) || y.p, y.x.tam, -y.x.qtd));
+    const ops = [['vendas', venda], ...[...novos.values()].map((p) => ['produtos', p])];
     if (pago > 0) ops.push(['pagamentos', { id: uid(), criado: Date.now(), clienteId: V.cid, data: hoje(), valor: pago, forma: 'hora', aloc: [{ vendaId: venda.id, valor: pago }] }]);
     await commit(ops);
     V.feito = { cid: V.cid, total, ganho: ganhoVenda(venda), saldo: saldo(V.cid) };
@@ -1261,11 +1347,12 @@ const A = {
     const aviso = v.pago > 0 ? ` O que ela pagou nessa compra (${brl(v.pago)}) some junto.` : '';
     if (!confirm(`Apagar a venda de ${dm(v.data)} (${brl(v.total)})? Os produtos voltam pro estoque.${aviso}`)) return false;
     const ops = [['vendas', null, v.id]];
+    const devolve = new Map();
     for (const i of v.itens) {
-      const p = prodPorCodTam(i.cod, i.tam) || prodPorCod(i.cod);
-      const ja = p && ops.find((o) => o[0] === 'produtos' && o[1] && o[1].id === p.id);
-      if (ja) ja[1].qtd += i.qtd; else if (p) ops.push(['produtos', { ...p, qtd: p.qtd + i.qtd }]);
+      const p = prodPorCod(i.cod);
+      if (p) devolve.set(p.id, mexeEstoque(devolve.get(p.id) || p, i.tam || '', i.qtd));
     }
+    for (const p of devolve.values()) ops.push(['produtos', p]);
     for (const p of S.pagamentos.filter((x) => x.aloc.some((a) => a.vendaId === v.id))) {
       const aloc = p.aloc.filter((a) => a.vendaId !== v.id);
       ops.push(aloc.length ? ['pagamentos', { ...p, aloc, valor: soma(aloc, (a) => a.valor) }] : ['pagamentos', null, p.id]);
@@ -1304,6 +1391,8 @@ const A = {
     try { const m = await testarChave(); V.modelo = m; V.teste = { ok: `A chave funciona. Vou usar o modelo ${m}.` }; }
     catch (e) { V.teste = { erro: e.message, det: e.detalhe }; }
   },
+  ajComPecas: async (v) => { await salvarCfg({ comPecas: v ? Number(v) : null }); toast('Comissão das peças salva.'); },
+  ajComAst: async (v) => { await salvarCfg({ comAsteriscos: Number(v) }); toast('Comissão dos itens com ** salva.'); },
   backupEnviar: () => fazerBackup(true),
   backupBaixar: () => fazerBackup(false),
   restaurar: async (v, el) => {
@@ -1459,7 +1548,7 @@ document.addEventListener('visibilitychange', () => {
 });
 
 // ================= início =================
-const VERSAO_APP = '1.4';
+const VERSAO_APP = '1.5';
 (async function iniciar() {
   try {
     db = await abrirDB();
