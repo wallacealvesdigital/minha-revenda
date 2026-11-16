@@ -397,7 +397,7 @@ function tProduto(r) {
 function tFoto(r) {
   const juntar = r.q.juntar === '1' && LEITURA;
   if (V.estado === 'lendo') {
-    return `<div class="screen"><main class="done"><div class="spin" aria-hidden="true"></div><h1>Lendo a lista…</h1><span class="muted">Leva uns segundos. Não feche o app.</span>
+    return `<div class="screen"><main class="done"><div class="spin" aria-hidden="true"></div><h1>Lendo a lista…</h1><span class="muted" role="status">${esc(V.lendoMsg || 'Leva uns segundos. Não feche o app.')}</span>
       ${V.preview ? `<div class="foto-area" style="width:100%"><img src="${V.preview}" alt="Foto da lista"></div>` : ''}</main></div>`;
   }
   const semChave = !S.cfg.geminiKey;
@@ -881,6 +881,8 @@ const SCHEMA = {
 // tenta outros e, por fim, pergunta ao Google quais modelos a chave dela pode usar.
 const URL_GEMINI = 'https://generativelanguage.googleapis.com/v1beta/';
 const MODELOS_RESERVA = ['gemini-flash-latest', 'gemini-3.5-flash', 'gemini-3-flash', 'gemini-2.5-flash'];
+// mais leves: menos disputados quando o Google está sobrecarregado (a conferência e o total pegam erro de leitura)
+const MODELOS_LEVES = ['gemini-flash-lite-latest', 'gemini-2.5-flash-lite'];
 
 class ErroLeitura extends Error {
   constructor(msg, detalhe) { super(msg); this.detalhe = detalhe || ''; }
@@ -905,7 +907,7 @@ function erroGemini(status, msg) {
   return new ErroLeitura('Não consegui ler a foto agora. Tente de novo daqui a pouco.', det);
 }
 
-// Lista os modelos "flash" que a chave pode usar, do mais novo pro mais antigo
+// Lista os modelos "flash" que a chave pode usar: os normais primeiro (mais novo antes), os "lite" no fim
 async function modelosDisponiveis() {
   const res = await gemini('models?pageSize=200');
   if (!res.ok) throw erroGemini(res.status, await textoErro(res));
@@ -914,41 +916,65 @@ async function modelosDisponiveis() {
   return (j.models || [])
     .filter((m) => (m.supportedGenerationMethods || []).includes('generateContent'))
     .map((m) => m.name.replace(/^models\//, ''))
-    .filter((n) => /flash/.test(n) && !/lite|image|tts|audio|live|embed|thinking|exp|8b/.test(n))
-    .sort((a, b) => (/preview/.test(a) - /preview/.test(b)) || ver(b) - ver(a));
+    .filter((n) => /flash/.test(n) && !/image|tts|audio|live|embed|thinking|exp|8b/.test(n))
+    .sort((a, b) => (/lite/.test(a) - /lite/.test(b)) || (/preview/.test(a) - /preview/.test(b)) || ver(b) - ver(a));
 }
 
-async function lerLista(dataUrl) {
+// Servidor do Google sobrecarregado ou limite por minuto: vale esperar e tentar de novo, ou ir pra outro modelo
+const ocupado = (status) => status === 429 || status >= 500;
+const espera = (ms) => new Promise((ok) => setTimeout(ok, ms));
+const MAX_TENTATIVAS = 7;
+
+async function lerLista(dataUrl, avisar = () => {}) {
   if (!S.cfg.geminiKey) throw new ErroLeitura('Falta colocar a chave do Gemini em Ajustes.');
   const body = JSON.stringify({
     contents: [{ parts: [{ text: PROMPT }, { inline_data: { mime_type: 'image/jpeg', data: dataUrl.split(',')[1] } }] }],
     generationConfig: { responseMimeType: 'application/json', responseSchema: SCHEMA, temperature: 0 }
   });
   const tentados = new Set();
-  let fila = [...new Set([S.cfg.geminiModel, ...MODELOS_RESERVA].filter(Boolean))];
+  let fila = [...new Set([S.cfg.geminiModel, ...MODELOS_RESERVA, ...MODELOS_LEVES].filter(Boolean))];
   let perguntou = false;
   let ultimo = '';
+  let ultStatus = 0, ultMsg = '';
+  let tentativas = 0;
+  let algumOcupado = false;
+  let principalSumiu = false;
   while (true) {
     const modelo = fila.shift();
     if (!modelo) {
-      if (perguntou) throw new ErroLeitura('Não achei um modelo do Gemini que funcione com essa chave.', ultimo);
-      perguntou = true;
-      fila = (await modelosDisponiveis()).filter((m) => !tentados.has(m)).slice(0, 4);
-      continue;
+      if (!perguntou) {
+        perguntou = true;
+        try { fila = (await modelosDisponiveis()).filter((m) => !tentados.has(m)).slice(0, 4); } catch (e) { fila = []; }
+        if (fila.length) continue;
+      }
+      if (algumOcupado) throw new ErroLeitura(`O Gemini está muito ocupado agora (tentei ${plural(tentativas, 'vez', 'vezes')}). Espere uns minutos e tente de novo.`, ultimo);
+      if (ultStatus && !modeloSumiu(ultStatus, ultMsg)) throw erroGemini(ultStatus, ultMsg);
+      throw new ErroLeitura('Não achei um modelo do Gemini que funcione com essa chave.', ultimo);
     }
     tentados.add(modelo);
-    const res = await gemini(`models/${encodeURIComponent(modelo)}:generateContent`, { method: 'POST', body });
-    if (!res.ok) {
-      const msg = await textoErro(res);
-      ultimo = `Modelo ${modelo}: erro ${res.status}${msg ? ' (' + msg + ')' : ''}`;
-      if (modeloSumiu(res.status, msg)) continue;
-      throw erroGemini(res.status, msg);
+    // o mesmo modelo ocupado ganha mais uma chance depois de uns segundos
+    for (let vez = 1; vez <= 2; vez++) {
+      if (tentativas >= MAX_TENTATIVAS) { fila = []; perguntou = true; break; }
+      tentativas++;
+      const res = await gemini(`models/${encodeURIComponent(modelo)}:generateContent`, { method: 'POST', body });
+      if (res.ok) {
+        // só troca o modelo gravado quando o anterior saiu do ar (ocupado é passageiro)
+        if (principalSumiu && modelo !== S.cfg.geminiModel && !/lite/.test(modelo)) await salvarCfg({ geminiModel: modelo });
+        const j = await res.json();
+        const txt = (j.candidates?.[0]?.content?.parts || []).map((p) => p.text || '').join('');
+        if (!txt) throw new ErroLeitura('O Gemini não devolveu nada dessa foto. Tente outra foto, mais perto e com mais luz.', j.promptFeedback ? JSON.stringify(j.promptFeedback) : '');
+        try { return JSON.parse(txt); } catch (e) { throw new ErroLeitura('Não entendi a foto. Tente outra foto, mais perto e com mais luz.', txt.slice(0, 200)); }
+      }
+      ultMsg = await textoErro(res);
+      ultStatus = res.status;
+      ultimo = `Modelo ${modelo}: erro ${res.status}${ultMsg ? ' (' + ultMsg + ')' : ''}`;
+      if (modeloSumiu(res.status, ultMsg)) { tentativas--; if (modelo === S.cfg.geminiModel) principalSumiu = true; break; }
+      if (!ocupado(res.status)) throw erroGemini(res.status, ultMsg);
+      algumOcupado = true;
+      if (vez === 1 && res.status >= 500) { avisar('O Gemini está ocupado. Tentando de novo…'); await espera(3000); continue; }
+      avisar('O Gemini está ocupado. Tentando outro jeito de ler…');
+      break;
     }
-    if (modelo !== S.cfg.geminiModel) await salvarCfg({ geminiModel: modelo }); // guarda o que funcionou
-    const j = await res.json();
-    const txt = (j.candidates?.[0]?.content?.parts || []).map((p) => p.text || '').join('');
-    if (!txt) throw new ErroLeitura('O Gemini não devolveu nada dessa foto. Tente outra foto, mais perto e com mais luz.', j.promptFeedback ? JSON.stringify(j.promptFeedback) : '');
-    try { return JSON.parse(txt); } catch (e) { throw new ErroLeitura('Não entendi a foto. Tente outra foto, mais perto e com mais luz.', txt.slice(0, 200)); }
   }
 }
 
@@ -957,7 +983,7 @@ async function testarChave() {
   const lista = await modelosDisponiveis();
   if (!lista.length) throw new ErroLeitura('A chave funciona, mas não achei um modelo que leia fotos.');
   const atual = S.cfg.geminiModel;
-  const usar = lista.includes(atual) ? atual : lista[0];
+  const usar = lista.includes(atual) ? atual : lista.find((m) => !/lite/.test(m)) || lista[0];
   if (usar !== atual) await salvarCfg({ geminiModel: usar });
   return usar;
 }
@@ -1053,7 +1079,7 @@ const A = {
       const foto = await comprimir(file);
       V.estado = 'lendo'; V.preview = foto; V.erro = '';
       render();
-      const r = await lerLista(foto);
+      const r = await lerLista(foto, (msg) => { V.lendoMsg = msg; if (rota().nome === 'foto' && V.estado === 'lendo') render(); });
       const comGeral = pct(r.comissao_geral);
       const itens = (r.itens || []).filter((x) => x && (x.nome || x.codigo)).map((x) => novoItem(x, x.asteriscos ? COM_ASTERISCOS : comGeral));
       const dataOk = r.data && /^\d{4}-\d{2}-\d{2}$/.test(r.data) && r.data <= hoje() ? r.data : null;
@@ -1433,7 +1459,7 @@ document.addEventListener('visibilitychange', () => {
 });
 
 // ================= início =================
-const VERSAO_APP = '1.3';
+const VERSAO_APP = '1.4';
 (async function iniciar() {
   try {
     db = await abrirDB();
