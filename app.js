@@ -306,6 +306,9 @@ function tInicio() {
   const vendi = soma(periodo, (v) => v.total);
   const ganho = soma(periodo, ganhoVenda);
   const aReceber = soma(S.vendas, devido);
+  // dinheiro que entrou desde o último acerto (pagamentos feitos nesse período, inclusive de compras antigas)
+  const acertoAtual = ultimoAcerto();
+  const recebido = soma(S.pagamentos.filter((p) => !acertoAtual || p.criado > acertoAtual.criado), (p) => p.valor);
   const acerto = ultimoAcerto();
   const visita = ultimoMov();
   const ultChegou = ultimoMov('chegou');
@@ -328,10 +331,10 @@ function tInicio() {
   <main class="main">
     <span class="muted small" style="font-weight:700">${acerto ? 'Desde o último acerto com a empresa (' + dm(acerto.data) + ')' : 'Desde o começo'}</span>
     <section class="grid2" aria-label="Resumo desde o último acerto">
-      <div class="card stat"><span class="muted small">Vendi</span><strong>${brl(vendi)}</strong></div>
-      <div class="card stat"><span class="muted small">Meu ganho previsto</span><strong class="ok">${brl(ganho)}</strong></div>
-      <div class="card stat"><span class="muted small">Falta receber das clientes</span><strong class="owe">${brl(aReceber)}</strong></div>
-      <div class="card stat"><span class="muted small">Passar pra empresa (total vendido)</span><strong>${brl(vendi)}</strong></div>
+      <div class="card stat"><span class="muted small">Vendido</span><strong>${brl(vendi)}</strong></div>
+      <div class="card stat"><span class="muted small">Ganhos previstos</span><strong class="ok">${brl(ganho)}</strong></div>
+      <div class="card stat"><span class="muted small">Recebido</span><strong class="ok">${brl(recebido)}</strong></div>
+      <div class="card stat"><span class="muted small">Falta receber</span><strong class="owe">${brl(aReceber)}</strong></div>
     </section>
     <div class="col">
       <a class="btn btn-p" href="#/venda">${IC.mais}Nova venda</a>
@@ -372,10 +375,11 @@ function tEstoque(r) {
     .filter((p) => (!q || norm(p.nome).includes(q) || p.cod.includes(q)) && (V.so === 'todos' || p.qtd <= ACABANDO))
     .sort((a, b) => (a.qtd > 0) !== (b.qtd > 0) ? (a.qtd > 0 ? -1 : 1) : ordemProd(a, b));
   const nAcab = S.produtos.filter((p) => p.qtd <= ACABANDO).length;
-  const itens = lista.map((p) => `<a class="item row" href="#/produto/${encodeURIComponent(p.id)}">
-      <div class="col" style="gap:2px;min-width:0"><strong>${esc(p.nome)}</strong><span class="muted small">Cód. ${esc(p.cod)} · ${brl(p.preco)} · ganho ${p.com}%</span>
+  const itens = lista.map((p) => `<a class="item prod" href="#/produto/${encodeURIComponent(p.id)}" style="color:var(--texto);text-decoration:none">
+      <div class="prod-info"><strong class="prod-nome">${esc(p.nome)}</strong>
+        <div class="prod-meta"><span>Cód. ${esc(p.cod)}</span><span>${brl(p.preco)}</span><span>Ganho ${p.com}%</span></div>
         ${temTamanhos(p) ? `<span class="small tams-txt">${esc(resumoTams(p))}</span>` : ''}</div>
-      <div class="col" style="align-items:flex-end;gap:4px"><span><strong style="font-size:22px">${p.qtd}</strong> <span class="muted small">un.</span></span>${p.qtd <= ACABANDO ? `<span class="tag">${p.qtd === 0 ? 'Acabou' : 'Última peça'}</span>` : ''}</div>
+      <div class="prod-qtd"><strong>${p.qtd}</strong><span class="muted small">${p.qtd === 1 ? 'unidade' : 'unidades'}</span>${p.qtd <= ACABANDO ? `<span class="tag">${p.qtd === 0 ? 'Acabou' : 'Última'}</span>` : ''}</div>
     </a>`).join('');
   const vazio = !S.produtos.length
     ? '<div class="item col" style="gap:12px"><span>Seu estoque está vazio. Quando chegar mercadoria, toque em “Chegou mercadoria” e tire foto da lista.</span></div>'
