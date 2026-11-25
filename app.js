@@ -201,6 +201,11 @@ const ultimoAcerto = () => S.movimentos.filter((m) => m.tipo === 'repasse').sort
 const vendasDoPeriodo = () => { const u = ultimoAcerto(); return S.vendas.filter((v) => !u || v.criado > u.criado); };
 const ultimoMov = (tipo) => S.movimentos.filter((m) => !tipo || m.tipo === tipo).sort((a, b) => (a.data < b.data ? -1 : a.data > b.data ? 1 : a.criado - b.criado)).slice(-1)[0] || null;
 const somaDias = (d, n) => { const x = new Date(d + 'T12:00:00'); x.setDate(x.getDate() + n); return iso(x); };
+const DIAS_ANTES_VISITA = 5;
+// próxima visita: a data impressa na lista; senão, a última visita + 60 dias
+const proximaVisita = () => { if (S.cfg.proximaVisita && S.cfg.proximaVisita >= hoje()) return S.cfg.proximaVisita; const v = ultimoMov(); return v ? somaDias(v.data, DIAS_ENTRE_VISITAS) : null; };
+// prazo pra cliente pagar; null se não tem visita prevista ou o prazo já passou
+const prazoPagamento = () => { const v = proximaVisita(); const p = v && somaDias(v, -DIAS_ANTES_VISITA); return p && p > hoje() ? p : null; };
 
 // Pagamento abate primeiro a compra mais antiga
 function alocar(cid, valor) {
@@ -672,6 +677,7 @@ function tClientes() {
   const lista = todas.filter((x) => (!q || norm(x.c.nome).includes(q)) && (V.so === 'todas' || x.s > 0)).sort((a, b) => a.c.nome.localeCompare(b.c.nome, 'pt-BR'));
   return `<div class="screen">
   <header class="top"><div class="row"><h1>Clientes</h1><span class="small">A receber: <span class="owe">${brl(soma(todas, (x) => x.s))}</span></span></div>
+    <a class="btn btn-p" href="#/cliente-form">${IC.mais}Nova cliente</a>
     <div class="search">${IC.busca}<label class="sr" for="busca">Buscar cliente</label><input id="busca" type="search" placeholder="Digite o nome. Ex.: Maria" value="${esc(V.q)}" data-i="q" autocomplete="off"></div>
     <div class="chips"><button type="button" class="chip ${V.so === 'todas' ? 'on' : ''}" data-a="cliFiltro" data-v="todas">Todas</button><button type="button" class="chip ${V.so === 'devendo' ? 'on' : ''}" data-a="cliFiltro" data-v="devendo">Devendo (${todas.filter((x) => x.s > 0).length})</button></div>
   </header>
@@ -680,7 +686,6 @@ function tClientes() {
     return `<a class="item row" href="#/cliente/${encodeURIComponent(x.c.id)}"><div class="col" style="gap:2px;min-width:0"><strong>${esc(x.c.nome)}</strong><span class="muted small">${u ? 'Última compra ' + dm(u) : 'Ainda não comprou'}</span></div>
       ${x.s > 0 ? `<div class="col" style="align-items:flex-end;gap:0"><span class="muted small">Deve</span><span class="owe">${brl(x.s)}</span></div>` : '<span class="tag tag-ok">Em dia</span>'}</a>`;
   }).join('') || `<div class="item">${S.clientes.length ? 'Nenhuma cliente' + (V.q ? ' com “' + esc(V.q) + '”' : '') + '.' : 'Nenhuma cliente cadastrada ainda.'}</div>`}</div>
-    <a class="btn btn-s" href="#/cliente-form">${IC.mais}Nova cliente</a>
   </main></div>`;
 }
 
@@ -693,7 +698,9 @@ function tCliente(r) {
   const pagos = {};
   for (const p of S.pagamentos.filter((x) => x.clienteId === c.id)) for (const a of p.aloc) (pagos[a.vendaId] = pagos[a.vendaId] || []).push({ ...a, forma: p.forma, data: p.data });
   const fone = String(c.telefone || '').replace(/\D/g, '');
-  const msg = `Oi, ${primeiroNome(c.nome)}! Tudo bem? Passando pra lembrar do valor em aberto das suas compras: ${brl(s)}. Pode me pagar quando der, por Pix ou dinheiro. Obrigada!`;
+  // prazo da cobrança: 5 dias antes da próxima visita da empresa (pra não chegar o acerto com cliente devendo)
+  const prazo = prazoPagamento();
+  const msg = `Oi, ${primeiroNome(c.nome)}! Tudo bem? Passando pra lembrar do valor em aberto das suas compras: ${brl(s)}. ${prazo ? `Consegue me pagar até ${dm(prazo)}, por Pix ou dinheiro?` : 'Consegue me pagar ainda essa semana, por Pix ou dinheiro?'} Preciso acertar tudo com a empresa antes da próxima entrega. Obrigada!`;
   const wa = 'https://wa.me/' + (fone ? (fone.length <= 11 ? '55' + fone : fone) : '') + '?text=' + encodeURIComponent(msg);
   const descPag = (v) => {
     const ps = pagos[v.id] || [];
@@ -716,7 +723,7 @@ function tCliente(r) {
     <h2>O que ela comprou</h2>
     ${vendas.length ? vendas.map((v) => `<section class="card">
       <div class="row"><strong>${dm(v.data)}</strong><span class="tag ${devido(v) > 0 ? '' : 'tag-ok'}">${devido(v) > 0 ? 'Falta ' + brl(devido(v)) : 'Pago'}</span></div>
-      ${v.itens.map((i) => `<div class="row small"><span>${i.qtd}× ${esc(i.nome)}${tamItem(i)}</span><span>${brl(i.qtd * i.preco)}</span></div>`).join('')}
+      ${v.itens.map((i) => `<div class="row small" style="align-items:flex-start"><span class="col" style="gap:0;min-width:0"><span>${i.qtd}× ${esc(i.nome)}${tamItem(i)}</span>${i.cod ? `<span class="muted">Cód. ${esc(i.cod)}</span>` : ''}</span><span style="white-space:nowrap">${brl(i.qtd * i.preco)}</span></div>`).join('')}
       <div class="row small line"><span class="muted">Total ${brl(v.total)} · ${descPag(v)}</span></div>
       <button type="button" class="linkbtn small" data-a="vendaApagar" data-v="${esc(v.id)}" style="align-self:flex-start;color:#9B1C1C">Apagar essa venda</button>
     </section>`).join('') : '<div class="item">Nenhuma compra ainda.</div>'}
@@ -801,7 +808,7 @@ function tVenda(r) {
       const chave = esc(x.id) + '|' + esc(x.tam);
       const tem = disponivel(x.p, x.tam);
       return `<div class="card" style="padding:14px 16px">
-      <div class="row" style="align-items:flex-start"><strong>${esc(x.p.nome)}${etiqueta(x.p, x.tam)}</strong><span style="white-space:nowrap">${x.qtd} × ${brl(x.p.preco)}</span></div>
+      <div class="row" style="align-items:flex-start"><span class="col" style="gap:2px;min-width:0"><strong>${esc(x.p.nome)}${etiqueta(x.p, x.tam)}</strong><span class="muted small">Cód. ${esc(x.p.cod)}</span></span><span style="white-space:nowrap">${x.qtd} × ${brl(x.p.preco)}</span></div>
       <div class="row"><button type="button" class="step txt" data-a="vendaTirar" data-v="${chave}">Tirar</button>${stepper('vendaMenos', 'vendaMais', x.qtd, `data-v="${chave}"`)}</div>
       ${x.qtd >= tem ? `<span class="small muted">Você tem ${plural(tem, 'unidade', 'unidades')} desse${x.tam ? ' no tamanho ' + esc(x.tam) : ''}.</span>` : ''}
     </div>`;
@@ -812,7 +819,7 @@ function tVenda(r) {
   </main>
   <div class="foot" data-r="foot">
     <div class="row"><span>Total da venda</span><strong style="font-size:22px">${brl(total)}</strong></div>
-    <div class="row small"><span class="muted">Pagou agora ${brl(pago)}</span><span class="owe">Fica devendo ${brl(total - pago)}</span></div>
+    <div class="row small" style="flex-wrap:wrap;row-gap:2px"><span class="muted" style="white-space:nowrap">Pagou agora ${brl(pago)}</span><span class="owe" style="white-space:nowrap">Fica devendo ${brl(total - pago)}</span></div>
     <div class="row small"><span class="muted">Meu ganho nessa venda</span><span class="ok">${brl(ganho)}</span></div>
     <button type="button" class="btn btn-p" data-a="vendaFinalizar" ${cart.length ? '' : 'disabled'}>Finalizar venda</button>
   </div></div>`;

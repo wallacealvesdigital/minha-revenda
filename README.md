@@ -30,7 +30,7 @@ PWA em HTML, CSS e JS puros, sem build e sem dependências. Os dados ficam no ce
 - Campos: nome do produto em Title Case (siglas de tamanho em maiúsculas; nomes antigos em MAIÚSCULAS são convertidos ao abrir), dinheiro com máscara (os números entram pela direita: 4990 vira R$ 49,90), celular no formato (11) 98765-4321.
 - Menu de baixo em todas as telas (menos o PIN).
 - Produto não encontrado na busca (estoque ou venda): "Produto não encontrado. Cadastre o produto." com o que foi digitado já preenchido; na venda, o rascunho é guardado e o produto novo volta direto pra venda.
-- Pagamento abate primeiro a compra mais antiga. Valor pago na hora da venda fica registrado como "na hora da venda".
+- Pagamento abate primeiro a compra mais antiga. "Cobrar no WhatsApp" pede pagamento até 5 dias antes da próxima visita da empresa (data da lista ou última visita + 60 dias); sem data ou com prazo vencido, "ainda essa semana". Valor pago na hora da venda fica registrado como "na hora da venda".
 - Apagar venda devolve os produtos ao estoque e tira o que foi pago nela.
 - Cópia de segurança: arquivo `.txt` (JSON) com tudo, inclusive fotos; não leva a chave do Gemini nem o PIN. Restaurar troca todos os dados. Ao terminar abre uma janela "Cópia enviada" (ou "salva no celular") e, se ela permitir, um aviso na barra do celular. O app só sabe que o arquivo foi entregue ao Drive, não se o upload terminou. Histórico das últimas 20 cópias em Ajustes › Cópias feitas; a última aparece no início com data e hora.
 - O app pede o PIN ao abrir e depois de 3 minutos em segundo plano. Esqueceu o PIN: só reinstalando e restaurando uma cópia.
