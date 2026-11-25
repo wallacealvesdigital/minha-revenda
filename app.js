@@ -265,10 +265,10 @@ function render(modo) {
   const chave = TRAVA ? 'pin' : rota().chave;
   const mesma = chave === ultimaChave;
   const ativo = document.activeElement && document.activeElement.id;
-  const scroll = mesma ? [...$app.querySelectorAll('.main,.sheet')].map((e) => e.scrollTop) : [];
+  const scroll = mesma ? [...$app.querySelectorAll('.screen,.main,.sheet')].map((e) => e.scrollTop) : [];
   $app.innerHTML = html;
   if (mesma) {
-    [...$app.querySelectorAll('.main,.sheet')].forEach((e, i) => { if (scroll[i]) e.scrollTop = scroll[i]; });
+    [...$app.querySelectorAll('.screen,.main,.sheet')].forEach((e, i) => { if (scroll[i]) e.scrollTop = scroll[i]; });
     if (ativo) { const el = document.getElementById(ativo); if (el && el.focus) el.focus({ preventScroll: true }); }
   } else {
     const auto = $app.querySelector('[data-auto]');

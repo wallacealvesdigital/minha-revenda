@@ -1,5 +1,5 @@
 // Guarda o app no celular pra abrir sem internet. Trocar VERSAO a cada atualização publicada.
-const VERSAO = 'revenda-v8';
+const VERSAO = 'revenda-v9';
 const ARQUIVOS = ['./', 'index.html', 'styles.css', 'app.js', 'manifest.webmanifest',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png'];
 
